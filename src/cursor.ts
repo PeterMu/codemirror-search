@@ -1,7 +1,7 @@
 import {Text, TextIterator, codePointAt, codePointSize, fromCodePoint} from "@codemirror/state"
 
 const basicNormalize: (string: string) => string = typeof String.prototype.normalize == "function"
-  ? x => x.normalize("NFKD") : x => x
+  ? x => x.normalize("NFC") : x => x
 
 /// A search cursor provides an iterator over text matches in a
 /// document.
