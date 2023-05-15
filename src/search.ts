@@ -1,7 +1,7 @@
 import {EditorView, ViewPlugin, ViewUpdate, Command, Decoration, DecorationSet,
         runScopeHandlers, KeyBinding,
         PanelConstructor, showPanel, Panel, getPanel} from "@codemirror/view"
-import {EditorState, StateField, StateEffect, EditorSelection, StateCommand, Prec,
+import {EditorState, StateField, StateEffect, EditorSelection, SelectionRange, StateCommand, Prec,
         Facet, Extension, RangeSetBuilder, Text, CharCategory, findClusterBreak,
         combineConfig} from "@codemirror/state"
 import elt from "crelt"
@@ -29,6 +29,10 @@ interface SearchConfig {
   /// Defaults to false.
   wholeWord?: boolean
 
+  /// Used to turn on regular expression search in the default query.
+  /// Defaults to false.
+  regexp?: boolean
+
   /// Can be used to override the way the search panel is implemented.
   /// Should create a [Panel](#view.Panel) that contains a form
   /// which lets the user:
@@ -43,7 +47,14 @@ interface SearchConfig {
   ///
   /// The field that should be focused when opening the panel must be
   /// tagged with a `main-field=true` DOM attribute.
-  createPanel?: (view: EditorView) => Panel
+  createPanel?: (view: EditorView) => Panel,
+
+  /// By default, matches are scrolled into view using the default
+  /// behavior of
+  /// [`EditorView.scrollIntoView`](#view.EditorView^scrollIntoView).
+  /// This option allows you to pass a custom function to produce the
+  /// scroll effect.
+  scrollToMatch?: (range: SelectionRange, view: EditorView) => StateEffect<unknown>
 }
 
 const searchConfigFacet: Facet<SearchConfig, Required<SearchConfig>> = Facet.define({
@@ -52,8 +63,10 @@ const searchConfigFacet: Facet<SearchConfig, Required<SearchConfig>> = Facet.def
       top: false,
       caseSensitive: false,
       literal: false,
+      regexp: false,
       wholeWord: false,
-      createPanel: view => new SearchPanel(view)
+      createPanel: view => new SearchPanel(view),
+      scrollToMatch: range => EditorView.scrollIntoView(range)
     })
   }
 })
@@ -194,7 +207,7 @@ class StringQuery extends QueryType<SearchResult> {
     return cursor.done ? null : cursor.value
   }
 
-  // Searching in reverse is, rather than implementing inverted search
+  // Searching in reverse is, rather than implementing an inverted search
   // cursor, done by scanning chunk after chunk forward.
   private prevMatchInRange(state: EditorState, from: number, to: number) {
     for (let pos = to;;) {
@@ -390,12 +403,14 @@ export const findNext = searchCommand((view, {query}) => {
   let {to} = view.state.selection.main
   let next = query.nextMatch(view.state, to, to)
   if (!next) return false
+  let selection = EditorSelection.single(next.from, next.to)
+  let config = view.state.facet(searchConfigFacet)
   view.dispatch({
-    selection: {anchor: next.from, head: next.to},
-    scrollIntoView: true,
-    effects: announceMatch(view, next),
+    selection,
+    effects: [announceMatch(view, next), config.scrollToMatch(selection.main, view)],
     userEvent: "select.search"
   })
+  selectSearchInput(view)
   return true
 })
 
@@ -404,14 +419,16 @@ export const findNext = searchCommand((view, {query}) => {
 /// of the document to start searching at the end again.
 export const findPrevious = searchCommand((view, {query}) => {
   let {state} = view, {from} = state.selection.main
-  let range = query.prevMatch(state, from, from)
-  if (!range) return false
+  let prev = query.prevMatch(state, from, from)
+  if (!prev) return false
+  let selection = EditorSelection.single(prev.from, prev.to)
+  let config = view.state.facet(searchConfigFacet)
   view.dispatch({
-    selection: {anchor: range.from, head: range.to},
-    scrollIntoView: true,
-    effects: announceMatch(view, range),
+    selection,
+    effects: [announceMatch(view, prev), config.scrollToMatch(selection.main, view)],
     userEvent: "select.search"
   })
+  selectSearchInput(view)
   return true
 })
 
@@ -450,24 +467,23 @@ export const replaceNext = searchCommand((view, {query}) => {
   if (state.readOnly) return false
   let next = query.nextMatch(state, from, from)
   if (!next) return false
-  let changes = [], selection: {anchor: number, head: number} | undefined, replacement: Text | undefined
-  let announce = []
+  let changes = [], selection: EditorSelection | undefined, replacement: Text | undefined
+  let effects: StateEffect<unknown>[] = []
   if (next.from == from && next.to == to) {
     replacement = state.toText(query.getReplacement(next))
     changes.push({from: next.from, to: next.to, insert: replacement})
     next = query.nextMatch(state, next.from, next.to)
-    announce.push(EditorView.announce.of(
+    effects.push(EditorView.announce.of(
       state.phrase("replaced match on line $", state.doc.lineAt(from).number) + "."))
   }
   if (next) {
     let off = changes.length == 0 || changes[0].from >= next.to ? 0 : next.to - next.from - replacement!.length
-    selection = {anchor: next.from - off, head: next.to - off}
-    announce.push(announceMatch(view, next))
+    selection = EditorSelection.single(next.from - off, next.to - off)
+    effects.push(announceMatch(view, next))
+    effects.push(state.facet(searchConfigFacet).scrollToMatch(selection.main, view))
   }
   view.dispatch({
-    changes, selection,
-    scrollIntoView: !!selection,
-    effects: announce,
+    changes, selection, effects,
     userEvent: "input.replace"
   })
   return true
@@ -504,17 +520,27 @@ function defaultQuery(state: EditorState, fallback?: SearchQuery) {
     search: (fallback?.literal ?? config.literal) ? selText : selText.replace(/\n/g, "\\n"),
     caseSensitive: fallback?.caseSensitive ?? config.caseSensitive,
     literal: fallback?.literal ?? config.literal,
+    regexp: fallback?.regexp ?? config.regexp,
     wholeWord: fallback?.wholeWord ?? config.wholeWord
   })
+}
+
+function getSearchInput(view: EditorView) {
+  let panel = getPanel(view, createSearchPanel)
+  return panel && panel.dom.querySelector("[main-field]") as HTMLInputElement | null
+}
+
+function selectSearchInput(view: EditorView) {
+  let input = getSearchInput(view)
+  if (input && input == view.root.activeElement)
+    input.select()
 }
 
 /// Make sure the search panel is open and focused.
 export const openSearchPanel: Command = view => {
   let state = view.state.field(searchState, false)
   if (state && state.panel) {
-    let panel = getPanel(view, createSearchPanel)
-    if (!panel) return false
-    let searchInput = panel.dom.querySelector("[main-field]") as HTMLInputElement | null
+    let searchInput = getSearchInput(view)
     if (searchInput && searchInput != view.root.activeElement) {
       let query = defaultQuery(view.state, state.query.spec)
       if (query.valid) view.dispatch({effects: setSearchQuery.of(query)})
