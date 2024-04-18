@@ -60,6 +60,14 @@ describe("SearchCursor", () => {
     while (!cursor.nextOverlapping().done) matches.push([cursor.value.from, cursor.value.to])
     ist(JSON.stringify(matches), "[[0,4],[2,6],[4,8]]")
   })
+
+  it("will not match partial normalized content", () => {
+    testMatches(new SearchCursor(Text.of(["´"]), " "), [])
+  })
+
+  it("produces the correct range for astral chars that get normalized to non-astral", () => {
+    testMatches(new SearchCursor(Text.of(["𝜎"]), "𝜎"), [[0, 2]])
+  })
 })
 
 describe("RegExpCursor", () => {

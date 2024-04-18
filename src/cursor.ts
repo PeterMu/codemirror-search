@@ -76,24 +76,26 @@ export class SearchCursor implements Iterator<{from: number, to: number}>{
       let norm = this.normalize(str)
       for (let i = 0, pos = start;; i++) {
         let code = norm.charCodeAt(i)
-        let match = this.match(code, pos)
-        if (match) {
-          this.value = match
-          return this
-         }
-        if (i == norm.length - 1) break
+        let match = this.match(code, pos, this.bufferPos + this.bufferStart)
+        if (i == norm.length - 1) {
+          if (match) {
+            this.value = match
+            return this
+          }
+          break
+        }
         if (pos == start && i < str.length && str.charCodeAt(i) == code) pos++
       }
     }
   }
 
-  private match(code: number, pos: number) {
+  private match(code: number, pos: number, end: number) {
     let match: null | {from: number, to: number} = null
     for (let i = 0; i < this.matches.length; i += 2) {
       let index = this.matches[i], keep = false
       if (this.query.charCodeAt(index) == code) {
         if (index == this.query.length - 1) {
-          match = {from: this.matches[i + 1], to: pos + 1}
+          match = {from: this.matches[i + 1], to: end}
         } else {
           this.matches[i]++
           keep = true
@@ -106,11 +108,11 @@ export class SearchCursor implements Iterator<{from: number, to: number}>{
     }
     if (this.query.charCodeAt(0) == code) {
       if (this.query.length == 1)
-        match = {from: pos, to: pos + 1}
+        match = {from: pos, to: end}
       else
         this.matches.push(1, pos)
     }
-    if (match && this.test && !this.test(match.from, match.to, this.buffer, this.bufferPos)) match = null
+    if (match && this.test && !this.test(match.from, match.to, this.buffer, this.bufferStart)) match = null
     return match
   }
 

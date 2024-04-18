@@ -293,11 +293,11 @@ class RegExpQuery extends QueryType<RegExpResult> {
   }
 
   getReplacement(result: RegExpResult) {
-    return this.spec.unquote(this.spec.replace.replace(/\$([$&\d+])/g, (m, i) =>
+    return this.spec.unquote(this.spec.replace).replace(/\$([$&\d+])/g, (m, i) =>
       i == "$" ? "$"
       : i == "&" ? result.match[0]
       : i != "0" && +i < result.match.length ? result.match[i]
-      : m))
+      : m)
   }
 
   matchAll(state: EditorState, limit: number) {
@@ -571,7 +571,7 @@ export const closeSearchPanel: Command = view => {
 ///  - Mod-f: [`openSearchPanel`](#search.openSearchPanel)
 ///  - F3, Mod-g: [`findNext`](#search.findNext)
 ///  - Shift-F3, Shift-Mod-g: [`findPrevious`](#search.findPrevious)
-///  - Alt-g: [`gotoLine`](#search.gotoLine)
+///  - Mod-Alt-g: [`gotoLine`](#search.gotoLine)
 ///  - Mod-d: [`selectNextOccurrence`](#search.selectNextOccurrence)
 export const searchKeymap: readonly KeyBinding[] = [
   {key: "Mod-f", run: openSearchPanel, scope: "editor search-panel"},
@@ -579,7 +579,7 @@ export const searchKeymap: readonly KeyBinding[] = [
   {key: "Mod-g", run: findNext, shift: findPrevious, scope: "editor search-panel", preventDefault: true},
   {key: "Escape", run: closeSearchPanel, scope: "editor search-panel"},
   {key: "Mod-Shift-l", run: selectSelectionMatches},
-  {key: "Alt-g", run: gotoLine},
+  {key: "Mod-Alt-g", run: gotoLine},
   {key: "Mod-d", run: selectNextOccurrence, preventDefault: true},
 ]
 
@@ -777,6 +777,6 @@ const baseTheme = EditorView.baseTheme({
 
 const searchExtensions = [
   searchState,
-  Prec.lowest(searchHighlighter),
+  Prec.low(searchHighlighter),
   baseTheme
 ]
