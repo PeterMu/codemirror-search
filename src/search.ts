@@ -181,7 +181,7 @@ abstract class QueryType<Result extends SearchResult = SearchResult> {
 
 const enum FindPrev { ChunkSize = 10000 }
 
-function stringCursor(spec: SearchQuery, state: EditorState, from: number, to: number) {
+export function stringCursor(spec: SearchQuery, state: EditorState, from: number, to: number) {
   const test = spec.wholeWord ? stringWordTest(state.doc, state.charCategorizer(state.selection.main.head)) : undefined
 
   const testWithinScope = (from: number, to: number, buffer: string, bufferPos: number) => {
@@ -258,7 +258,7 @@ const enum RegExp { HighlightMargin = 250 }
 
 type RegExpResult = typeof RegExpCursor.prototype.value
 
-function regexpCursor(spec: SearchQuery, state: EditorState, from: number, to: number) {
+export function regexpCursor(spec: SearchQuery, state: EditorState, from: number, to: number) {
   const test = spec.wholeWord ? regexpWordTest(state.charCategorizer(state.selection.main.head)) : undefined
 
   const testWithinScope = (from: number, to: number, match: RegExpExecArray) => {
