@@ -83,6 +83,15 @@ describe("Search scope", () => {
     ist(scope(view.state), "[[2,7]]")
   })
 
+  it("keeps a custom test when the scope moves", () => {
+    let view = mkView("n [n n] n")
+    let test = (_match: string, _state: EditorState, from: number) => from != 8
+    view.dispatch({effects: setSearchQuery.of(new SearchQuery({search: "n", literal: true, scope: [{from: 2, to: 7}], test}))})
+    view.dispatch({changes: {from: 0, insert: "nn "}})
+    ist(getSearchQuery(view.state).test, test)
+    ist(matches(view.state), "6")
+  })
+
   it("clears the scope when the panel closes", () => {
     let view = scoped("n [n n] n", 2, 7)
     openSearchPanel(view)

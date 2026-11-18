@@ -74,7 +74,7 @@ export class SearchCursor implements Iterator<{from: number, to: number}>{
       let str = fromCodePoint(next), start = this.bufferStart + this.bufferPos
       this.bufferPos += codePointSize(next)
       let norm = this.normalize(str)
-      for (let i = 0, pos = start;; i++) {
+      if (norm.length) for (let i = 0, pos = start;; i++) {
         let code = norm.charCodeAt(i)
         let match = this.match(code, pos, this.bufferPos + this.bufferStart)
         if (i == norm.length - 1) {
@@ -116,7 +116,7 @@ export class SearchCursor implements Iterator<{from: number, to: number}>{
     return match
   }
 
-  [Symbol.iterator]!: () => Iterator<{from: number, to: number}>
+  declare [Symbol.iterator]: () => Iterator<{from: number, to: number}>
 }
 
 if (typeof Symbol != "undefined")

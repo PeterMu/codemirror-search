@@ -110,6 +110,9 @@ export class SearchQuery {
   /// @internal
   readonly unquoted: string
 
+  /// Optional test function used to filter matches.
+  readonly test: ((match: string, state: EditorState, from: number, to: number) => boolean) | undefined
+
   /// Create a query object.
   constructor(config: {
     /// The search string.
@@ -128,6 +131,11 @@ export class SearchQuery {
     wholeWord?: boolean
     // The ranges to match within
     scope?: Readonly<{ from: number; to: number }[]>
+
+    /// Optional custom filter. It is passed the matched string, the
+    /// editor state, and the match range. Matches for which it
+    /// returns false will be ignored.
+    test?: (match: string, state: EditorState, from: number, to: number) => boolean
   }) {
     this.search = config.search
     this.caseSensitive = !!config.caseSensitive
@@ -138,6 +146,7 @@ export class SearchQuery {
     this.unquoted = this.unquote(this.search)
     this.wholeWord = !!config.wholeWord
     this.scope = config.scope
+    this.test = config.test
   }
 
   /// @internal
@@ -150,7 +159,8 @@ export class SearchQuery {
   eq(other: SearchQuery) {
     return this.search == other.search && this.replace == other.replace &&
       this.caseSensitive == other.caseSensitive && this.regexp == other.regexp &&
-      this.wholeWord == other.wholeWord && sameScope(this.scope, other.scope)
+      this.wholeWord == other.wholeWord && this.test == other.test &&
+      sameScope(this.scope, other.scope)
   }
 
   /// @internal
@@ -162,6 +172,7 @@ export class SearchQuery {
       regexp: this.regexp,
       replace: this.replace,
       wholeWord: this.wholeWord,
+      test: this.test,
       scope
     })
   }
@@ -215,17 +226,31 @@ abstract class QueryType<Result extends SearchResult = SearchResult> {
 
 const enum FindPrev { ChunkSize = 10000 }
 
-export function stringCursor(spec: SearchQuery, state: EditorState, from: number, to: number) {
-  const test = spec.wholeWord ? stringWordTest(state.doc, state.charCategorizer(state.selection.main.head)) : undefined
+function inScope(scope: Scope, from: number, to: number) {
+  return scope.some(range => from >= range.from && from <= range.to && to >= range.from && to <= range.to)
+}
 
-  const testWithinScope = (from: number, to: number, buffer: string, bufferPos: number) => {
-    return (!test || test(from, to, buffer, bufferPos))
-        && (!spec.scope || spec.scope.some(range => from >= range.from && from <= range.to && to >= range.from && to <= range.to))
+function wrapStringTest(test: (match: string, state: EditorState, from: number, to: number) => boolean,
+                        state: EditorState,
+                        inner: ((from: number, to: number, buffer: string, bufferPos: number) => boolean) | undefined) {
+  return (from: number, to: number, buffer: string, bufferPos: number) => {
+    if (inner && !inner(from, to, buffer, bufferPos)) return false
+    let match = from >= bufferPos && to <= bufferPos + buffer.length
+      ? buffer.slice(from - bufferPos, to - bufferPos)
+      : state.doc.sliceString(from, to)
+    return test(match, state, from, to)
   }
+}
 
-  return new SearchCursor(
-    state.doc, spec.unquoted, from, to, spec.caseSensitive ? undefined : x => x.toLowerCase(), testWithinScope
-  )
+export function stringCursor(spec: SearchQuery, state: EditorState, from: number, to: number) {
+  let test: ((from: number, to: number, buffer: string, bufferPos: number) => boolean) | undefined
+  if (spec.wholeWord) test = stringWordTest(state.doc, state.charCategorizer(state.selection.main.head))
+  if (spec.scope) {
+    let inner = test, scope = spec.scope
+    test = (from, to, buffer, bufferPos) => (!inner || inner(from, to, buffer, bufferPos)) && inScope(scope, from, to)
+  }
+  if (spec.test) test = wrapStringTest(spec.test, state, test)
+  return new SearchCursor(state.doc, spec.unquoted, from, to, spec.caseSensitive ? undefined : x => x.toLowerCase(), test)
 }
 
 function stringWordTest(doc: Text, categorizer: (ch: string) => CharCategory) {
@@ -248,8 +273,11 @@ class StringQuery extends QueryType<SearchResult> {
 
   nextMatch(state: EditorState, curFrom: number, curTo: number) {
     let cursor = stringCursor(this.spec, state, curTo, state.doc.length).nextOverlapping()
-    if (cursor.done) cursor = stringCursor(this.spec, state, 0, curFrom).nextOverlapping()
-    return cursor.done ? null : cursor.value
+    if (cursor.done) {
+      let end = Math.min(state.doc.length, curFrom + this.spec.unquoted.length)
+      cursor = stringCursor(this.spec, state, 0, end).nextOverlapping()
+    }
+    return cursor.done || cursor.value.from == curFrom && cursor.value.to == curTo ? null : cursor.value
   }
 
   // Searching in reverse is, rather than implementing an inverted search
@@ -266,8 +294,10 @@ class StringQuery extends QueryType<SearchResult> {
   }
 
   prevMatch(state: EditorState, curFrom: number, curTo: number) {
-    return this.prevMatchInRange(state, 0, curFrom) ||
-      this.prevMatchInRange(state, curTo, state.doc.length)
+    let found = this.prevMatchInRange(state, 0, curFrom)
+    if (!found)
+      found = this.prevMatchInRange(state, Math.max(0, curTo - this.spec.unquoted.length), state.doc.length)
+    return found && (found.from != curFrom || found.to != curTo) ? found : null
   }
 
   getReplacement(_result: SearchResult) { return this.spec.unquote(this.spec.replace) }
@@ -292,18 +322,23 @@ const enum RegExp { HighlightMargin = 250 }
 
 type RegExpResult = typeof RegExpCursor.prototype.value
 
-export function regexpCursor(spec: SearchQuery, state: EditorState, from: number, to: number) {
-  const test = spec.wholeWord ? regexpWordTest(state.charCategorizer(state.selection.main.head)) : undefined
-
-  const testWithinScope = (from: number, to: number, match: RegExpExecArray) => {
-    return (!test || test(from, to, match))
-      && (!spec.scope || spec.scope.some(range => from >= range.from && from <= range.to && to >= range.from && to <= range.to))
+function wrapRegexpTest(test: (match: string, state: EditorState, from: number, to: number) => boolean,
+                        state: EditorState,
+                        inner: ((from: number, to: number, match: RegExpExecArray) => boolean) | undefined) {
+  return (from: number, to: number, match: RegExpExecArray) => {
+    return (!inner || inner(from, to, match)) && test(match[0], state, from, to)
   }
+}
 
-  return new RegExpCursor(state.doc, spec.search, {
-    ignoreCase: !spec.caseSensitive,
-    test: testWithinScope,
-  }, from, to)
+export function regexpCursor(spec: SearchQuery, state: EditorState, from: number, to: number) {
+  let test: ((from: number, to: number, match: RegExpExecArray) => boolean) | undefined
+  if (spec.wholeWord) test = regexpWordTest(state.charCategorizer(state.selection.main.head))
+  if (spec.scope) {
+    let inner = test, scope = spec.scope
+    test = (from, to, match) => (!inner || inner(from, to, match)) && inScope(scope, from, to)
+  }
+  if (spec.test) test = wrapRegexpTest(spec.test, state, test)
+  return new RegExpCursor(state.doc, spec.search, {ignoreCase: !spec.caseSensitive, test}, from, to)
 }
 
 function charBefore(str: string, index: number) {
@@ -345,11 +380,15 @@ class RegExpQuery extends QueryType<RegExpResult> {
   }
 
   getReplacement(result: RegExpResult) {
-    return this.spec.unquote(this.spec.replace).replace(/\$([$&\d+])/g, (m, i) =>
-      i == "$" ? "$"
-      : i == "&" ? result.match[0]
-      : i != "0" && +i < result.match.length ? result.match[i]
-      : m)
+    return this.spec.unquote(this.spec.replace).replace(/\$([$&]|\d+)/g, (m, i) => {
+      if (i == "&") return result.match[0]
+      if (i == "$") return "$"
+      for (let l = i.length; l > 0; l--) {
+        let n = +i.slice(0, l)
+        if (n > 0 && n < result.match.length) return result.match[n] + i.slice(l)
+      }
+      return m
+    })
   }
 
   matchAll(state: EditorState, limit: number) {
@@ -529,8 +568,9 @@ export const selectSelectionMatches: StateCommand = ({state, dispatch}) => {
 export const replaceNext = searchCommand((view, {query}) => {
   let {state} = view, {from, to} = state.selection.main
   if (state.readOnly) return false
-  let next = query.nextMatch(state, from, from)
-  if (!next) return false
+  let match = query.nextMatch(state, from, from)
+  if (!match) return false
+  let next: SearchResult | null = match
   let changes = [], selection: EditorSelection | undefined, replacement: Text | undefined
   let effects: StateEffect<unknown>[] = []
   if (next.from == from && next.to == to) {
@@ -540,14 +580,16 @@ export const replaceNext = searchCommand((view, {query}) => {
     effects.push(EditorView.announce.of(
       state.phrase("replaced match on line $", state.doc.lineAt(from).number) + "."))
   }
+  let changeSet = view.state.changes(changes)
   if (next) {
-    let off = changes.length == 0 || changes[0].from >= next.to ? 0 : next.to - next.from - replacement!.length
-    selection = EditorSelection.single(next.from - off, next.to - off)
+    selection = EditorSelection.single(next.from, next.to).map(changeSet)
     effects.push(announceMatch(view, next))
     effects.push(state.facet(searchConfigFacet).scrollToMatch(selection.main, view))
   }
   view.dispatch({
-    changes, selection, effects,
+    changes: changeSet,
+    selection,
+    effects,
     userEvent: "input.replace"
   })
   return true
