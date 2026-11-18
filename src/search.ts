@@ -3,7 +3,7 @@ import {EditorView, ViewPlugin, ViewUpdate, Command, Decoration, DecorationSet,
         PanelConstructor, showPanel, Panel, getPanel} from "@codemirror/view"
 import {EditorState, StateField, StateEffect, EditorSelection, SelectionRange, StateCommand, Prec,
         Facet, Extension, RangeSetBuilder, Text, CharCategory, findClusterBreak,
-        combineConfig} from "@codemirror/state"
+        combineConfig, ChangeDesc} from "@codemirror/state"
 import elt from "crelt"
 import {SearchCursor} from "./cursor"
 import {RegExpCursor, validRegExp} from "./regexp"
@@ -101,6 +101,10 @@ export class SearchQuery {
   /// When true, matches that contain words are ignored when there are
   /// further word characters around them.
   readonly wholeWord: boolean
+  /// The ranges to match within, or undefined to search the whole
+  /// document. The search state maps them through document changes,
+  /// a query seeded from the selection keeps them, and closing the
+  /// search panel clears them.
   readonly scope?: Readonly<{ from: number; to: number }[]>
 
   /// @internal
@@ -146,7 +150,20 @@ export class SearchQuery {
   eq(other: SearchQuery) {
     return this.search == other.search && this.replace == other.replace &&
       this.caseSensitive == other.caseSensitive && this.regexp == other.regexp &&
-      this.wholeWord == other.wholeWord && this.scope == other.scope
+      this.wholeWord == other.wholeWord && sameScope(this.scope, other.scope)
+  }
+
+  /// @internal
+  withScope(scope: Readonly<{ from: number; to: number }[]> | undefined) {
+    return new SearchQuery({
+      search: this.search,
+      caseSensitive: this.caseSensitive,
+      literal: this.literal,
+      regexp: this.regexp,
+      replace: this.replace,
+      wholeWord: this.wholeWord,
+      scope
+    })
   }
 
   /// @internal
@@ -164,6 +181,23 @@ export class SearchQuery {
 }
 
 type SearchResult = typeof SearchCursor.prototype.value
+
+type Scope = Readonly<{ from: number; to: number }[]>
+
+function sameScope(a: Scope | undefined, b: Scope | undefined) {
+  if (a == b) return true
+  if (!a || !b || a.length != b.length) return false
+  return a.every((range, i) => range.from == b[i].from && range.to == b[i].to)
+}
+
+// Text inserted at the edges of a range stays outside it, and an empty
+// range stays empty.
+function mapScope(scope: Scope, changes: ChangeDesc): Scope {
+  return scope.map(range => {
+    let from = changes.mapPos(range.from, 1), to = changes.mapPos(range.to, -1)
+    return {from: Math.min(from, to), to}
+  })
+}
 
 abstract class QueryType<Result extends SearchResult = SearchResult> {
   constructor(readonly spec: SearchQuery) {}
@@ -348,9 +382,21 @@ const searchState: StateField<SearchState> = StateField.define<SearchState>({
     return new SearchState(defaultQuery(state).create(), null)
   },
   update(value, tr) {
+    // The scope follows edits. Effects refer to the changed document.
+    let {scope} = value.query.spec
+    if (scope && tr.docChanged) {
+      let mapped = mapScope(scope, tr.changes)
+      if (!sameScope(mapped, scope)) value = new SearchState(value.query.spec.withScope(mapped).create(), value.panel)
+    }
     for (let effect of tr.effects) {
-      if (effect.is(setSearchQuery)) value = new SearchState(effect.value.create(), value.panel)
-      else if (effect.is(togglePanel)) value = new SearchState(value.query, effect.value ? createSearchPanel : null)
+      if (effect.is(setSearchQuery)) {
+        value = new SearchState(effect.value.create(), value.panel)
+      } else if (effect.is(togglePanel)) {
+        // Closing the panel, by any command, ends searching within the scope.
+        let query = value.query
+        if (!effect.value && query.spec.scope) query = query.spec.withScope(undefined).create()
+        value = new SearchState(query, effect.value ? createSearchPanel : null)
+      }
     }
     return value
   },
@@ -539,7 +585,8 @@ function defaultQuery(state: EditorState, fallback?: SearchQuery) {
     caseSensitive: fallback?.caseSensitive ?? config.caseSensitive,
     literal: fallback?.literal ?? config.literal,
     regexp: fallback?.regexp ?? config.regexp,
-    wholeWord: fallback?.wholeWord ?? config.wholeWord
+    wholeWord: fallback?.wholeWord ?? config.wholeWord,
+    scope: fallback?.scope
   })
 }
 
@@ -610,7 +657,6 @@ class SearchPanel implements Panel {
   withinSelectionField: HTMLInputElement
   dom: HTMLElement
   query: SearchQuery
-  scope?: Readonly<{ from: number, to: number }[]>
 
   constructor(readonly view: EditorView) {
     let query = this.query = view.state.field(searchState).query.spec
@@ -663,12 +709,7 @@ class SearchPanel implements Panel {
       name: "withinSelection",
       form: "",
       checked: !!query.scope,
-      onchange: (event: Event) => {
-        this.scope = (event.target as HTMLInputElement).checked
-            ? view.state.selection.ranges
-            : undefined
-        this.commit()
-      }
+      onchange: this.commit
     }) as HTMLInputElement
 
     function button(name: string, onclick: () => void, content: (Node | string)[]) {
@@ -699,15 +740,19 @@ class SearchPanel implements Panel {
   }
 
   commit() {
+    // Keep the current scope, which follows edits. Checking the option
+    // searches within the current selection.
+    let current = this.view.state.field(searchState).query.spec, scope: Scope | undefined
+    if (this.withinSelectionField.checked) scope = current.scope || this.view.state.selection.ranges
     let query = new SearchQuery({
       search: this.searchField.value,
       caseSensitive: this.caseField.checked,
       regexp: this.reField.checked,
       wholeWord: this.wordField.checked,
       replace: this.replaceField.value,
-      scope: this.scope,
+      scope
     })
-    if (!query.eq(this.query)) {
+    if (!query.eq(current)) {
       this.query = query
       this.view.dispatch({effects: setSearchQuery.of(query)})
     }
@@ -738,6 +783,7 @@ class SearchPanel implements Panel {
     this.caseField.checked = query.caseSensitive
     this.reField.checked = query.regexp
     this.wordField.checked = query.wholeWord
+    this.withinSelectionField.checked = !!query.scope
   }
 
   mount() {
